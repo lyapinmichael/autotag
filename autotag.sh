@@ -46,6 +46,7 @@ PREFIX_SEP="-"
 RULES='
 gp,getpulse | semvertag | gp    | major minor patch build rc | build
 lotus,lm    | semvertag | lm    | major minor patch build rc | build
+lqmini,lq   | semvertag | lq    | major minor patch build rc | build
 debug       | bleeding  | debug |                            |
 '
  
