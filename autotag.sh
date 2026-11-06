@@ -95,11 +95,20 @@ usage() {
     cat <<EOF
 Usage:
   $SCRIPT_NAME [OPTIONS]
+  $SCRIPT_NAME install [--bin DIR]
+  $SCRIPT_NAME uninstall [--bin DIR]
  
 Options:
   -p, --path PATH       Git repository path.
   -r, --rule ALIAS      Rule alias (see autotag.rules).
+  --bin DIR             Bin directory for install/uninstall.
   -h, --help            Show this help.
+ 
+Commands:
+  install               Symlink this script as 'autotag' in a bin directory
+                        on PATH (default: first writable of ~/.local/bin,
+                        /opt/homebrew/bin, /usr/local/bin, ~/bin).
+  uninstall             Remove 'autotag' symlinks that point to this script.
  
 Examples:
   $SCRIPT_NAME
@@ -146,6 +155,145 @@ trim() {
     value="${value%"${value##*[![:space:]]}"}"
  
     printf '%s\n' "$value"
+}
+ 
+ 
+# =============================================================================
+# PATH CHECK
+# =============================================================================
+ 
+# dir_on_path DIR -> 0 if DIR is listed in PATH
+dir_on_path() {
+    local want="$1" dir
+    local IFS=:
+ 
+    for dir in $PATH; do
+        [ "$dir" = "$want" ] && return 0
+    done
+ 
+    return 1
+}
+ 
+# autotag_on_path -> 0 if an executable 'autotag' somewhere on PATH resolves
+# to this script (any PATH entry counts, not only the first match)
+autotag_on_path() {
+    local dir candidate real
+    local IFS=:
+ 
+    for dir in $PATH; do
+        [ -n "$dir" ] || continue
+        candidate="$dir/autotag"
+        [ -x "$candidate" ] || continue
+        real="$(resolve_path "$candidate")" || continue
+        [ "$real" = "$SELF_PATH" ] && return 0
+    done
+ 
+    return 1
+}
+ 
+# ensure_on_path
+#
+# Refuses to run unless autotag is installed on PATH; nudges the user towards
+# 'autotag install' instead of habitual './autotag.sh' runs.
+ensure_on_path() {
+    autotag_on_path && return 0
+ 
+    error "Autotag is not in PATH. To install it run: $SCRIPT_NAME install"
+    exit 1
+}
+ 
+ 
+# =============================================================================
+# INSTALLATION  (autotag install / autotag uninstall)
+# =============================================================================
+ 
+# pick_bin_dir
+#
+# Prints the first existing writable directory from the preference list;
+# user-owned directories are preferred over system-wide ones.
+pick_bin_dir() {
+    local dir
+ 
+    for dir in "$HOME/.local/bin" "/opt/homebrew/bin" "/usr/local/bin" "$HOME/bin"; do
+        [ -d "$dir" ] && [ -w "$dir" ] && { printf '%s\n' "$dir"; return 0; }
+    done
+ 
+    return 1
+}
+ 
+# cmd_install
+#
+# Creates an 'autotag' symlink to this script in $BIN_DIR (or the directory
+# picked by pick_bin_dir) and checks that the directory is on PATH.
+cmd_install() {
+    local dir="$BIN_DIR" link real
+ 
+    if [ -z "$dir" ]; then
+        dir="$(pick_bin_dir)" ||
+            die "no writable bin directory found; pass --bin DIR"
+    fi
+ 
+    mkdir -p "$dir" 2>/dev/null || die "cannot create bin directory: $dir"
+ 
+    link="$dir/autotag"
+ 
+    if [ -L "$link" ] || [ -e "$link" ]; then
+        real="$(resolve_path "$link" 2>/dev/null)" || real=""
+        if [ "$real" != "$SELF_PATH" ]; then
+            warn "replacing existing $link (${real:-not resolvable})"
+        fi
+    fi
+ 
+    ln -sfn "$SELF_PATH" "$link" ||
+        die "failed to create symlink: $link"
+ 
+    echo "Installed: $link -> $SELF_PATH"
+ 
+    if ! dir_on_path "$dir"; then
+        warn "$dir is not on your PATH"
+        echo "Add it, e.g.:  echo 'export PATH=\"$dir:\$PATH\"' >> ~/.zshrc"
+    fi
+}
+ 
+# cmd_uninstall
+#
+# Removes 'autotag' entries that resolve to this script: the one in $BIN_DIR
+# if given, otherwise every one found on PATH.
+cmd_uninstall() {
+    local dir candidate real found=0
+ 
+    if [ -n "$BIN_DIR" ]; then
+        candidate="$BIN_DIR/autotag"
+        if real="$(resolve_path "$candidate" 2>/dev/null)" &&
+           [ "$real" = "$SELF_PATH" ]; then
+            rm "$candidate" || die "failed to remove: $candidate"
+            echo "Removed: $candidate"
+            return 0
+        fi
+        echo "No installation of this script in $BIN_DIR."
+        return 1
+    fi
+ 
+    local IFS=:
+ 
+    for dir in $PATH; do
+        [ -n "$dir" ] || continue
+        candidate="$dir/autotag"
+        [ -e "$candidate" ] || continue
+        real="$(resolve_path "$candidate" 2>/dev/null)" || continue
+        if [ "$real" = "$SELF_PATH" ]; then
+            rm "$candidate" || die "failed to remove: $candidate"
+            echo "Removed: $candidate"
+            found=1
+        fi
+    done
+ 
+    if [ "$found" -eq 0 ]; then
+        echo "No installation of this script found on PATH."
+        return 1
+    fi
+ 
+    return 0
 }
  
  
@@ -639,10 +787,24 @@ next_tag_bleeding() {
  
 REPO_PATH="."
 CLI_RULE=""
+COMMAND=""
+BIN_DIR=""
  
 while [ $# -gt 0 ]; do
  
     case "$1" in
+ 
+        install|uninstall)
+            [ -z "$COMMAND" ] || die "only one command is allowed"
+            COMMAND="$1"
+            shift
+            ;;
+ 
+        --bin)
+            [ $# -ge 2 ] || die "option $1 requires a directory"
+            BIN_DIR="$2"
+            shift 2
+            ;;
  
         -p|--path)
             [ $# -ge 2 ] || die "option $1 requires a path"
@@ -670,16 +832,42 @@ while [ $# -gt 0 ]; do
  
 done
  
+if [ -n "$BIN_DIR" ] && [ -z "$COMMAND" ]; then
+    die "--bin is only valid with install/uninstall"
+fi
+ 
+if [ -n "$COMMAND" ]; then
+    [ "$REPO_PATH" = "." ] || die "-p/--path is not valid with $COMMAND"
+    [ -z "$CLI_RULE" ] || die "-r/--rule is not valid with $COMMAND"
+fi
+ 
  
 # -----------------------------------------------------------------------------
-# 2. Load rules.
+# 2. Handle install/uninstall.
+# -----------------------------------------------------------------------------
+ 
+case "$COMMAND" in
+    install)   cmd_install;   exit 0 ;;
+    uninstall) cmd_uninstall; exit $? ;;
+esac
+ 
+ 
+# -----------------------------------------------------------------------------
+# 3. Make sure autotag is installed on PATH.
+# -----------------------------------------------------------------------------
+ 
+ensure_on_path
+ 
+ 
+# -----------------------------------------------------------------------------
+# 4. Load rules.
 # -----------------------------------------------------------------------------
  
 load_rules_file
  
  
 # -----------------------------------------------------------------------------
-# 3. Check Git repository.
+# 5. Check Git repository.
 # -----------------------------------------------------------------------------
  
 if ! is_git_repository; then
@@ -693,7 +881,7 @@ REPO_PATH="$REPO_ROOT"
  
  
 # -----------------------------------------------------------------------------
-# 4. Fetch tags.
+# 6. Fetch tags.
 # -----------------------------------------------------------------------------
  
 echo "Fetching tags from '$REMOTE'..."
@@ -703,7 +891,7 @@ git_cmd fetch --tags --force "$REMOTE" ||
  
  
 # -----------------------------------------------------------------------------
-# 5. Check active branch.
+# 7. Check active branch.
 # -----------------------------------------------------------------------------
  
 CURRENT_BRANCH="$(get_current_branch)" ||
@@ -711,7 +899,7 @@ CURRENT_BRANCH="$(get_current_branch)" ||
  
  
 # -----------------------------------------------------------------------------
-# 6. Check HEAD commit.
+# 8. Check HEAD commit.
 # -----------------------------------------------------------------------------
  
 HEAD_COMMIT="$(get_head_commit)" ||
@@ -727,7 +915,7 @@ fi
  
  
 # -----------------------------------------------------------------------------
-# 7. Check tags on current commit.
+# 9. Check tags on current commit.
 # -----------------------------------------------------------------------------
  
 HEAD_TAGS="$(git_cmd tag --points-at "$HEAD_COMMIT")"
@@ -748,7 +936,7 @@ fi
  
  
 # -----------------------------------------------------------------------------
-# 8. Select rule.
+# 10. Select rule.
 # -----------------------------------------------------------------------------
  
 RULE_ALIAS="$CLI_RULE"
@@ -774,7 +962,7 @@ fi
  
  
 # -----------------------------------------------------------------------------
-# 9. Read rule configuration.
+# 11. Read rule configuration.
 # -----------------------------------------------------------------------------
  
 if ! load_rule "$RULE_ALIAS"; then
@@ -795,7 +983,7 @@ echo "Prefix:     ${PREFIX:-<none>}"
  
  
 # -----------------------------------------------------------------------------
-# 10. Select variant.
+# 12. Select variant.
 # -----------------------------------------------------------------------------
  
 VARIANT=""
@@ -826,7 +1014,7 @@ fi
  
  
 # -----------------------------------------------------------------------------
-# 11. Calculate next tag.
+# 13. Calculate next tag.
 # -----------------------------------------------------------------------------
  
 echo
@@ -845,7 +1033,7 @@ echo "New tag:      $NEW_TAG"
  
  
 # -----------------------------------------------------------------------------
-# 12. Make sure generated tag doesn't already exist.
+# 14. Make sure generated tag doesn't already exist.
 # -----------------------------------------------------------------------------
  
 if git_cmd rev-parse --verify --quiet "refs/tags/$NEW_TAG" >/dev/null; then
@@ -854,7 +1042,7 @@ fi
  
  
 # -----------------------------------------------------------------------------
-# 13. Confirm creation.
+# 15. Confirm creation.
 # -----------------------------------------------------------------------------
  
 echo
@@ -867,7 +1055,7 @@ fi
  
  
 # -----------------------------------------------------------------------------
-# 14. Create local tag.
+# 16. Create local tag.
 # -----------------------------------------------------------------------------
  
 git_cmd tag "$NEW_TAG" "$HEAD_COMMIT" ||
@@ -877,7 +1065,7 @@ echo "Tag created locally: $NEW_TAG"
  
  
 # -----------------------------------------------------------------------------
-# 15. Push branch and tag atomically.
+# 17. Push branch and tag atomically.
 # -----------------------------------------------------------------------------
  
 echo
