@@ -77,8 +77,11 @@ debug       | bleeding  | debug |                            |
 #   RULE | KIND | FORMAT | REGEX
 #
 #   RULE   Rule type the template applies to.
-#   KIND   'release' for regular tags, 'rc' for release candidates; 'rc' is
-#          only consulted for the rc variant.
+#   KIND   Template kind. Available kinds:
+#            release  regular tags; required for every rule type
+#            rc       release candidates for the current version; required
+#                     by semvertag rules that offer the rc variant, never
+#                     used by bleeding
 #   FORMAT How a new tag is rendered. Placeholders:
 #            {PREFIX}  prefix + PREFIX_SEP, or nothing if the prefix is empty
 #            {MAJOR} {MINOR} {PATCH} {BUILD} {RC}   used by semvertag
