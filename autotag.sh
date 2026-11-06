@@ -191,15 +191,15 @@ autotag_on_path() {
     return 1
 }
  
-# ensure_on_path
+# warn_unless_on_path
 #
-# Refuses to run unless autotag is installed on PATH; nudges the user towards
-# 'autotag install' instead of habitual './autotag.sh' runs.
-ensure_on_path() {
+# Warns when autotag is not installed on PATH, to nudge the user towards
+# 'autotag install' instead of habitual './autotag.sh' runs; execution
+# continues either way.
+warn_unless_on_path() {
     autotag_on_path && return 0
  
-    error "Autotag is not in PATH. To install it run: $SCRIPT_NAME install"
-    exit 1
+    warn "Autotag is not in PATH. To install it run: $SCRIPT_NAME install"
 }
  
  
@@ -853,10 +853,10 @@ esac
  
  
 # -----------------------------------------------------------------------------
-# 3. Make sure autotag is installed on PATH.
+# 3. Warn if autotag is not installed on PATH.
 # -----------------------------------------------------------------------------
  
-ensure_on_path
+warn_unless_on_path
  
  
 # -----------------------------------------------------------------------------

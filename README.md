@@ -5,7 +5,8 @@ A tool to automate incremental tagging for git repos
 `./autotag.sh install` creates an `autotag` symlink in a bin directory on `$PATH`
 (default: first writable of `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`,
 `~/bin`; `--bin DIR` to choose). `autotag uninstall` removes it. When autotag is
-invoked but not installed on `$PATH`, it reminds the user to run `autotag install`.
+invoked but not installed on `$PATH`, it prints a reminder to run `autotag install`
+and continues.
 
 #### Planned features and improvements: 
 - [x] add `fetch` in the beginning of the procedure to get most recent changes from remote
