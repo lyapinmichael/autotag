@@ -8,6 +8,8 @@
 #   git 2.4+ (push --atomic)
 #   date
 #
+#   autotag.rules next to the script (rule definitions)
+#
 # No external dependencies.
 # =============================================================================
  
@@ -17,11 +19,48 @@ set -f
  
  
 # =============================================================================
-# CONFIGURATION  (the only place with rule-specific information)
+# SCRIPT LOCATION
 # =============================================================================
  
-# Default rule alias. Empty = always ask.
-DEFAULT_RULE="debug"
+# resolve_path PATH
+#
+# Prints PATH as an absolute path with all symlinks resolved. Works with
+# BSD readlink (macOS), which has no -f option.
+resolve_path() {
+    local path="$1" dir link
+ 
+    case "$path" in
+        /*) ;;
+        *)  path="$PWD/$path" ;;
+    esac
+ 
+    while [ -L "$path" ]; do
+        dir="${path%/*}"
+        link="$(readlink "$path")"
+        case "$link" in
+            /*) path="$link" ;;
+            *)  path="$dir/$link" ;;
+        esac
+    done
+ 
+    dir="$(cd "${path%/*}" 2>/dev/null && pwd -P)" || return 1
+ 
+    printf '%s/%s\n' "$dir" "${path##*/}"
+}
+ 
+# The rules file is looked up next to the real script, so everything keeps
+# working when the script is invoked through a symlink installed on PATH.
+SELF_PATH="$(resolve_path "$0")" || {
+    echo "Error: failed to resolve script location: $0" >&2
+    exit 1
+}
+ 
+SCRIPT_DIR="${SELF_PATH%/*}"
+ 
+ 
+# =============================================================================
+# CONFIGURATION
+# =============================================================================
  
 # Remote used for push.
 REMOTE="origin"
@@ -29,52 +68,8 @@ REMOTE="origin"
 # Separator between prefix and version. Part of the expanded prefix.
 PREFIX_SEP="-"
  
- 
-# -----------------------------------------------------------------------------
-# RULES
-#
-#   ALIASES | RULE | PREFIX | VARIANTS | DEFAULT_VARIANT
-#
-#   ALIASES          comma-separated aliases (the only thing -r accepts)
-#   RULE             rule type; must have TEMPLATES and a handler function
-#                    next_tag_<RULE> (see "TAG GENERATION")
-#   PREFIX           [A-Za-z0-9_]*, may be empty
-#   VARIANTS         space-separated variants, empty = no variants
-#   DEFAULT_VARIANT  empty = always ask
-# -----------------------------------------------------------------------------
- 
-RULES='
-gp,getpulse | semvertag | gp    | major minor patch build rc | build
-lotus,lm    | semvertag | lm    | major minor patch build rc | build
-lqmini,lq   | semvertag | lq    | major minor patch build rc | build
-debug       | bleeding  | debug |                            |
-'
- 
- 
-# -----------------------------------------------------------------------------
-# TEMPLATES
-#
-#   RULE | KIND | FORMAT | REGEX
-#
-#   FORMAT  how a new tag is rendered. Placeholders:
-#             {PREFIX}  prefix + PREFIX_SEP, or nothing if the prefix is empty
-#             {MAJOR} {MINOR} {PATCH} {BUILD} {RC} {YEAR} {WEEK}
-#   REGEX   ERE that recognises existing tags (REGEX is the last field, so it
-#           may contain '|'). Placeholder:
-#             {PREFIX?}  optional prefix group "(prefix-)?", or nothing
-#           The regex MUST end with the numeric capture groups below; groups
-#           are read from the END of the match, so the optional prefix group
-#           never shifts the numbering:
-#             semvertag/release : major minor patch build
-#             semvertag/rc      : major minor patch rc
-#             bleeding/release  : year week build
-# -----------------------------------------------------------------------------
- 
-TEMPLATES='
-semvertag | release | {PREFIX}{MAJOR}.{MINOR}.{PATCH}-{BUILD} | ^{PREFIX?}([0-9]+)\.([0-9]+)\.([0-9]+)-([0-9]+)$
-semvertag | rc      | {PREFIX}{MAJOR}.{MINOR}.{PATCH}-rc{RC}  | ^{PREFIX?}([0-9]+)\.([0-9]+)\.([0-9]+)-rc([0-9]+)$
-bleeding  | release | {PREFIX}{YEAR}.{WEEK}.{BUILD}           | ^{PREFIX?}([0-9]{2})\.([0-9]{2})\.([0-9]+)$
-'
+# Rules, templates and the default rule live in autotag.rules next to this
+# script; see load_rules_file below. Tool-level settings stay here.
  
  
 # =============================================================================
@@ -103,7 +98,7 @@ Usage:
  
 Options:
   -p, --path PATH       Git repository path.
-  -r, --rule ALIAS      Rule alias (see RULES in the script).
+  -r, --rule ALIAS      Rule alias (see autotag.rules).
   -h, --help            Show this help.
  
 Examples:
@@ -157,6 +152,29 @@ trim() {
 # =============================================================================
 # CONFIGURATION ACCESS
 # =============================================================================
+ 
+# load_rules_file
+#
+# Sources the rule definitions. AUTOTAG_RULES overrides the default location
+# (autotag.rules next to the script); a repository-local rules file will be
+# searched here later.
+load_rules_file() {
+    local file
+    local default_file="${SCRIPT_DIR}/autotag.rules"
+ 
+    file="${AUTOTAG_RULES:-$default_file}"
+ 
+    if [ ! -f "$file" ]; then
+        die "rules file not found: $file (set AUTOTAG_RULES to override)"
+    fi
+ 
+    # shellcheck source=/dev/null
+    . "$file"
+ 
+    if [ -z "$(trim "$RULES")" ]; then
+        die "no rules are defined in $file"
+    fi
+}
  
 # load_rule ALIAS
 #
@@ -654,7 +672,14 @@ done
  
  
 # -----------------------------------------------------------------------------
-# 2. Check Git repository.
+# 2. Load rules.
+# -----------------------------------------------------------------------------
+ 
+load_rules_file
+ 
+ 
+# -----------------------------------------------------------------------------
+# 3. Check Git repository.
 # -----------------------------------------------------------------------------
  
 if ! is_git_repository; then
@@ -668,7 +693,7 @@ REPO_PATH="$REPO_ROOT"
  
  
 # -----------------------------------------------------------------------------
-# 3. Fetch tags.
+# 4. Fetch tags.
 # -----------------------------------------------------------------------------
  
 echo "Fetching tags from '$REMOTE'..."
@@ -678,7 +703,7 @@ git_cmd fetch --tags --force "$REMOTE" ||
  
  
 # -----------------------------------------------------------------------------
-# 4. Check active branch.
+# 5. Check active branch.
 # -----------------------------------------------------------------------------
  
 CURRENT_BRANCH="$(get_current_branch)" ||
@@ -686,7 +711,7 @@ CURRENT_BRANCH="$(get_current_branch)" ||
  
  
 # -----------------------------------------------------------------------------
-# 5. Check HEAD commit.
+# 6. Check HEAD commit.
 # -----------------------------------------------------------------------------
  
 HEAD_COMMIT="$(get_head_commit)" ||
@@ -702,7 +727,7 @@ fi
  
  
 # -----------------------------------------------------------------------------
-# 6. Check tags on current commit.
+# 7. Check tags on current commit.
 # -----------------------------------------------------------------------------
  
 HEAD_TAGS="$(git_cmd tag --points-at "$HEAD_COMMIT")"
@@ -719,15 +744,6 @@ if [ -n "$HEAD_TAGS" ]; then
         exit 0
     fi
  
-fi
- 
- 
-# -----------------------------------------------------------------------------
-# 7. Validate configuration.
-# -----------------------------------------------------------------------------
- 
-if [ -z "$(trim "$RULES")" ]; then
-    die "no rules are configured"
 fi
  
  
