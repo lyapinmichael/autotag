@@ -1,54 +1,98 @@
 # =============================================================================
 # autotag.rules
 #
-# Rule definitions for autotag.sh, sourced by the script at startup.
-# The file is looked up next to the script itself; AUTOTAG_RULES overrides
-# the location. This is plain bash and must stay syntactically valid.
+# Rule definitions for autotag.sh. The script sources this file at startup;
+# it is plain bash, so it must stay syntactically valid. Only the three
+# assignments matter (DEFAULT_RULE, RULES, TEMPLATES); everything else is
+# documentation.
+#
+# Location: the script looks for this file next to itself, so everything
+# keeps working through an installed 'autotag' symlink. The AUTOTAG_RULES
+# environment variable points the script at a different file.
 #
 # Planned: autotag will additionally look for a rules file in the repository
-# it is called at, so per-project custom rules live with the project.
+# it is called at, so per-project custom rules can live with the project.
 # =============================================================================
  
-# Default rule alias. Empty = always ask.
+# Rule used when -r/--rule is not given. Empty = always ask.
 DEFAULT_RULE="debug"
  
 # -----------------------------------------------------------------------------
 # RULES
 #
+# One line per rule; fields are separated by '|':
+#
 #   ALIASES | RULE | PREFIX | VARIANTS | DEFAULT_VARIANT
 #
-#   ALIASES          comma-separated aliases (the only thing -r accepts)
-#   RULE             rule type; must have TEMPLATES and a handler function
-#                    next_tag_<RULE> (see "TAG GENERATION" in autotag.sh)
-#   PREFIX           [A-Za-z0-9_]*, may be empty
-#   VARIANTS         space-separated variants, empty = no variants
-#   DEFAULT_VARIANT  empty = always ask
+#   ALIASES          Comma-separated names; -r/--rule accepts any of them.
+#   RULE             Rule type; currently 'semvertag' or 'bleeding'. A type
+#                    needs matching TEMPLATES below and a handler function
+#                    next_tag_<RULE> in autotag.sh ("TAG GENERATION").
+#   PREFIX           Optional tag prefix, [A-Za-z0-9_]*, may be empty.
+#                    Rendered as "<prefix>-" before the tag: prefix 'gp'
+#                    gives tags like gp-7.1.3-12, no prefix gives 7.1.3-12.
+#   VARIANTS         Increment variants offered for this rule, space-
+#                    separated; use only variants the rule type supports
+#                    (see the variants reference below). Empty = the rule
+#                    increments automatically and never asks.
+#   DEFAULT_VARIANT  Variant pre-selected at the prompt. Empty = always ask.
+#
 # -----------------------------------------------------------------------------
- 
+# VARIANTS REFERENCE
+#
+# Supported by 'semvertag' (example: previous tag 7.1.3-12):
+#
+#   major   -> 8.0.0-1     major version up; minor, patch and build reset
+#   minor   -> 7.2.0-1     minor version up; patch and build reset
+#   patch   -> 7.1.4-1     patch version up; build reset
+#   build   -> 7.1.3-13    same version; build counter up
+#   rc      -> 7.1.3-rc1   release candidate for the current version;
+#                          repeated runs give rc2, rc3, ...
+#
+# At the interactive prompt the single letters M, m, p and b are accepted
+# as shorthands for major, minor, patch and build; 'rc' has no shorthand.
+# Without a previous release the sequence starts at 0.0.0 (build 0), so the
+# first tags are 0.0.0-1, or 0.0.0-rc1 for the rc variant.
+#
+# 'bleeding' supports no variants and ignores this field: it always tags
+# YEAR.WEEK.N (e.g. debug-26.45.0), where YEAR/WEEK are the current ISO
+# year and week and N counts from 0 within that week.
+# -----------------------------------------------------------------------------
+#
+# Example rule for a project that wants prefixed tags and every variant
+# offered, with 'build' pre-selected:
+#
+#   myapp | semvertag | myapp | major minor patch build rc | build
+#
 RULES='
-gp,getpulse | semvertag | gp    | major minor patch build rc | build
-lotus,lm    | semvertag | lm    | major minor patch build rc | build
-lqmini,lq   | semvertag | lq    | major minor patch build rc | build
+release     | semvertag |       | major minor patch build rc | build
 debug       | bleeding  | debug |                            |
 '
  
 # -----------------------------------------------------------------------------
 # TEMPLATES
 #
+# One line per rule type and kind; fields are separated by '|':
+#
 #   RULE | KIND | FORMAT | REGEX
 #
-#   FORMAT  how a new tag is rendered. Placeholders:
-#             {PREFIX}  prefix + PREFIX_SEP, or nothing if the prefix is empty
-#             {MAJOR} {MINOR} {PATCH} {BUILD} {RC} {YEAR} {WEEK}
-#   REGEX   ERE that recognises existing tags (REGEX is the last field, so it
-#           may contain '|'). Placeholder:
-#             {PREFIX?}  optional prefix group "(prefix-)?", or nothing
-#           The regex MUST end with the numeric capture groups below; groups
-#           are read from the END of the match, so the optional prefix group
-#           never shifts the numbering:
-#             semvertag/release : major minor patch build
-#             semvertag/rc      : major minor patch rc
-#             bleeding/release  : year week build
+#   RULE   Rule type the template applies to.
+#   KIND   'release' for regular tags, 'rc' for release candidates; 'rc' is
+#          only consulted for the rc variant.
+#   FORMAT How a new tag is rendered. Placeholders:
+#            {PREFIX}  prefix + PREFIX_SEP, or nothing if the prefix is empty
+#            {MAJOR} {MINOR} {PATCH} {BUILD} {RC}   used by semvertag
+#            {YEAR} {WEEK}                           used by bleeding
+#          Use only the placeholders the rule type's handler provides.
+#   REGEX  ERE that recognises existing tags; anchor it with ^...$. Being the
+#          last field, it may contain '|'. Placeholder:
+#            {PREFIX?}  optional prefix group "(prefix-)?", or nothing
+#          The regex MUST end with the numeric capture groups below; groups
+#          are read from the END of the match, so the optional prefix group
+#          never shifts the numbering:
+#            semvertag/release : major minor patch build
+#            semvertag/rc      : major minor patch rc
+#            bleeding/release  : year week build
 # -----------------------------------------------------------------------------
  
 TEMPLATES='

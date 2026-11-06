@@ -113,8 +113,8 @@ Commands:
 Examples:
   $SCRIPT_NAME
   $SCRIPT_NAME --rule debug
-  $SCRIPT_NAME -r gp
-  $SCRIPT_NAME -p path/to/repo -r getpulse
+  $SCRIPT_NAME -r release
+  $SCRIPT_NAME -p path/to/repo -r release
 EOF
 }
  
