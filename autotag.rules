@@ -86,8 +86,11 @@ DEFAULT_RULE="debug"
 #   myapp | semvertag | myapp | major minor patch build rc | build
 #
 # Rules defined in this file (the aliases -r/--rule accepts):
-#   release, debug
+#   gp, getpulse, lotus, lm, lqmini, lq, release, debug
 RULES='
+gp,getpulse | semvertag | gp    | major minor patch build rc | build
+lotus,lm    | semvertag | lm    | major minor patch build rc | build
+lqmini,lq   | semvertag | lq    | major minor patch build rc | build
 release     | semvertag |       | major minor patch build rc | build
 debug       | bleeding  | debug |                            |
 '
