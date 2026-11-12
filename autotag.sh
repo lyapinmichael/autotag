@@ -638,13 +638,17 @@ find_latest_semver() {
     done < <(git_cmd tag --list)
 }
  
-# find_latest_rc REGEX MAJOR MINOR PATCH
+# find_latest_rc_series REGEX
 #
-# Sets LATEST_RC: largest RC number for exactly this MAJOR.MINOR.PATCH.
-find_latest_rc() {
-    local regex="$1" want_ma="$2" want_mi="$3" want_pa="$4"
-    local tag n rc
+# Sets LATEST_RC_MAJOR LATEST_RC_MINOR LATEST_RC_PATCH and LATEST_RC: the
+# highest version that has rc tags, and the largest rc number within that
+# version. All empty if no rc tag matches.
+find_latest_rc_series() {
+    local regex="$1" tag n rc vkey best_vkey=""
  
+    LATEST_RC_MAJOR=""
+    LATEST_RC_MINOR=""
+    LATEST_RC_PATCH=""
     LATEST_RC=""
  
     while IFS= read -r tag; do
@@ -653,13 +657,20 @@ find_latest_rc() {
  
         n=${#BASH_REMATCH[@]}
  
-        [ "$((10#${BASH_REMATCH[$((n - 4))]}))" -eq "$want_ma" ] || continue
-        [ "$((10#${BASH_REMATCH[$((n - 3))]}))" -eq "$want_mi" ] || continue
-        [ "$((10#${BASH_REMATCH[$((n - 2))]}))" -eq "$want_pa" ] || continue
+        printf -v vkey '%010d%010d%010d' \
+            "$((10#${BASH_REMATCH[$((n - 4))]}))" \
+            "$((10#${BASH_REMATCH[$((n - 3))]}))" \
+            "$((10#${BASH_REMATCH[$((n - 2))]}))"
  
         rc="$((10#${BASH_REMATCH[$((n - 1))]}))"
  
-        if [ -z "$LATEST_RC" ] || [ "$rc" -gt "$LATEST_RC" ]; then
+        if [ -z "$best_vkey" ] || [[ "$vkey" > "$best_vkey" ]]; then
+            best_vkey="$vkey"
+            LATEST_RC_MAJOR="$((10#${BASH_REMATCH[$((n - 4))]}))"
+            LATEST_RC_MINOR="$((10#${BASH_REMATCH[$((n - 3))]}))"
+            LATEST_RC_PATCH="$((10#${BASH_REMATCH[$((n - 2))]}))"
+            LATEST_RC="$rc"
+        elif [ "$vkey" = "$best_vkey" ] && [ "$rc" -gt "$LATEST_RC" ]; then
             LATEST_RC="$rc"
         fi
  
@@ -680,7 +691,8 @@ find_latest_rc() {
 #   7.1.3-12 -> minor -> 7.2.0-1
 #   7.1.3-12 -> patch -> 7.1.4-1
 #   7.1.3-12 -> build -> 7.1.3-13
-#   7.1.3-12 -> rc    -> 7.1.3-rc1, 7.1.3-rc2, ...
+#   rc targets the newest version seen (latest release or rc tag):
+#   7.1.3-12 -> rc -> 7.1.3-rc1, 7.1.3-rc2, ...; 8.0.0-rc5 -> rc -> 8.0.0-rc6
 # No previous release: counting starts from 0.0.0 (build 0).
 next_tag_semvertag() {
     local rule="$1" prefix="$2" variant="$3"
@@ -715,9 +727,27 @@ next_tag_semvertag() {
             re_rc="$(expand_regex "$rule" rc "$prefix")" || return 1
             fmt="$(template_field "$rule" rc format)" || return 1
  
-            find_latest_rc "$re_rc" "$major" "$minor" "$patch"
+            find_latest_rc_series "$re_rc"
  
-            rc=$(( ${LATEST_RC:-0} + 1 ))
+            rc=1
+ 
+            if [ -n "$LATEST_RC" ]; then
+                local key_release key_rc
+ 
+                printf -v key_release '%010d%010d%010d' "$major" "$minor" "$patch"
+                printf -v key_rc '%010d%010d%010d' \
+                    "$LATEST_RC_MAJOR" "$LATEST_RC_MINOR" "$LATEST_RC_PATCH"
+ 
+                # Anchor to the newest version seen. An rc series for a
+                # version older than the latest release is stale and starts
+                # over at rc1 for the released version.
+                if [[ "$key_rc" > "$key_release" ]] || [ "$key_rc" = "$key_release" ]; then
+                    major="$LATEST_RC_MAJOR"
+                    minor="$LATEST_RC_MINOR"
+                    patch="$LATEST_RC_PATCH"
+                    rc=$((LATEST_RC + 1))
+                fi
+            fi
  
             NEW_TAG="$(render_format "$fmt" \
                 PREFIX "$pfx" MAJOR "$major" MINOR "$minor" \
