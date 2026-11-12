@@ -8,6 +8,8 @@
 #   git 2.4+ (push --atomic)
 #   date
 #
+#   autotag.rules next to the script (rule definitions)
+#
 # No external dependencies.
 # =============================================================================
  
@@ -17,11 +19,48 @@ set -f
  
  
 # =============================================================================
-# CONFIGURATION  (the only place with rule-specific information)
+# SCRIPT LOCATION
 # =============================================================================
  
-# Default rule alias. Empty = always ask.
-DEFAULT_RULE="debug"
+# resolve_path PATH
+#
+# Prints PATH as an absolute path with all symlinks resolved. Works with
+# BSD readlink (macOS), which has no -f option.
+resolve_path() {
+    local path="$1" dir link
+ 
+    case "$path" in
+        /*) ;;
+        *)  path="$PWD/$path" ;;
+    esac
+ 
+    while [ -L "$path" ]; do
+        dir="${path%/*}"
+        link="$(readlink "$path")"
+        case "$link" in
+            /*) path="$link" ;;
+            *)  path="$dir/$link" ;;
+        esac
+    done
+ 
+    dir="$(cd "${path%/*}" 2>/dev/null && pwd -P)" || return 1
+ 
+    printf '%s/%s\n' "$dir" "${path##*/}"
+}
+ 
+# The rules file is looked up next to the real script, so everything keeps
+# working when the script is invoked through a symlink installed on PATH.
+SELF_PATH="$(resolve_path "$0")" || {
+    echo "Error: failed to resolve script location: $0" >&2
+    exit 1
+}
+ 
+SCRIPT_DIR="${SELF_PATH%/*}"
+ 
+ 
+# =============================================================================
+# CONFIGURATION
+# =============================================================================
  
 # Remote used for push.
 REMOTE="origin"
@@ -29,45 +68,52 @@ REMOTE="origin"
 # Separator between prefix and version. Part of the expanded prefix.
 PREFIX_SEP="-"
  
+# Default rule alias. Empty = always ask; the user rules file may override.
+DEFAULT_RULE="debug"
+ 
+ 
+# =============================================================================
+# BUILT-IN RULES
+#
+# Shipped with the script and not meant to be changed: together with the
+# rule-type handlers below they define how autotag operates. User aliases
+# are added (and built-in aliases redefined) in autotag.rules next to the
+# script.
+# =============================================================================
  
 # -----------------------------------------------------------------------------
-# RULES
-#
-#   ALIASES | RULE | PREFIX | VARIANTS | DEFAULT_VARIANT
-#
-#   ALIASES          comma-separated aliases (the only thing -r accepts)
-#   RULE             rule type; must have TEMPLATES and a handler function
-#                    next_tag_<RULE> (see "TAG GENERATION")
-#   PREFIX           [A-Za-z0-9_]*, may be empty
-#   VARIANTS         space-separated variants, empty = no variants
-#   DEFAULT_VARIANT  empty = always ask
+# BUILT-IN RULE TABLE  (same format as the user table in autotag.rules)
 # -----------------------------------------------------------------------------
  
-RULES='
-gp,getpulse | semvertag | gp    | major minor patch build rc | build
-lotus,lm    | semvertag | lm    | major minor patch build rc | build
-lqmini,lq   | semvertag | lq    | major minor patch build rc | build
+BUILTIN_RULES='
+release     | semvertag |       | major minor patch build rc | build
 debug       | bleeding  | debug |                            |
 '
- 
  
 # -----------------------------------------------------------------------------
 # TEMPLATES
 #
 #   RULE | KIND | FORMAT | REGEX
 #
-#   FORMAT  how a new tag is rendered. Placeholders:
-#             {PREFIX}  prefix + PREFIX_SEP, or nothing if the prefix is empty
-#             {MAJOR} {MINOR} {PATCH} {BUILD} {RC} {YEAR} {WEEK}
-#   REGEX   ERE that recognises existing tags (REGEX is the last field, so it
-#           may contain '|'). Placeholder:
-#             {PREFIX?}  optional prefix group "(prefix-)?", or nothing
-#           The regex MUST end with the numeric capture groups below; groups
-#           are read from the END of the match, so the optional prefix group
-#           never shifts the numbering:
-#             semvertag/release : major minor patch build
-#             semvertag/rc      : major minor patch rc
-#             bleeding/release  : year week build
+#   RULE   Rule type the row applies to: semvertag or bleeding.
+#   KIND   Which flavour of tag the row describes:
+#            release  a regular tag; every rule type needs this row
+#            rc       a release candidate; semvertag needs it when the rule
+#                     offers the rc variant (bleeding never uses rc)
+#   FORMAT How a new tag is rendered. Placeholders:
+#            {PREFIX}  prefix + PREFIX_SEP, or nothing if the prefix is empty
+#            {MAJOR} {MINOR} {PATCH} {BUILD} {RC}   used by semvertag
+#            {YEAR} {WEEK}                           used by bleeding
+#          Use only the placeholders the rule type's handler provides.
+#   REGEX  ERE that recognises existing tags; anchor it with ^...$. Being the
+#          last field, it may contain '|'. Placeholder:
+#            {PREFIX?}  optional prefix group "(prefix-)?", or nothing
+#          The regex MUST end with the numeric capture groups below; groups
+#          are read from the END of the match, so the optional prefix group
+#          never shifts the numbering:
+#            semvertag/release : major minor patch build
+#            semvertag/rc      : major minor patch rc
+#            bleeding/release  : year week build
 # -----------------------------------------------------------------------------
  
 TEMPLATES='
@@ -100,17 +146,27 @@ usage() {
     cat <<EOF
 Usage:
   $SCRIPT_NAME [OPTIONS]
+  $SCRIPT_NAME install [--bin DIR]
+  $SCRIPT_NAME uninstall [--bin DIR]
  
 Options:
   -p, --path PATH       Git repository path.
-  -r, --rule ALIAS      Rule alias (see RULES in the script).
+  -r, --rule ALIAS      Rule alias (built-in: release, debug; user aliases
+                        in autotag.rules).
+  --bin DIR             Bin directory for install/uninstall.
   -h, --help            Show this help.
+ 
+Commands:
+  install               Symlink this script as 'autotag' in a bin directory
+                        on PATH (default: first writable of ~/.local/bin,
+                        /opt/homebrew/bin, /usr/local/bin, ~/bin).
+  uninstall             Remove 'autotag' symlinks that point to this script.
  
 Examples:
   $SCRIPT_NAME
   $SCRIPT_NAME --rule debug
-  $SCRIPT_NAME -r gp
-  $SCRIPT_NAME -p path/to/repo -r getpulse
+  $SCRIPT_NAME -r release
+  $SCRIPT_NAME -p path/to/repo -r release
 EOF
 }
  
@@ -155,8 +211,186 @@ trim() {
  
  
 # =============================================================================
+# PATH CHECK
+# =============================================================================
+ 
+# dir_on_path DIR -> 0 if DIR is listed in PATH
+dir_on_path() {
+    local want="$1" dir
+    local IFS=:
+ 
+    for dir in $PATH; do
+        [ "$dir" = "$want" ] && return 0
+    done
+ 
+    return 1
+}
+ 
+# autotag_on_path -> 0 if an executable 'autotag' somewhere on PATH resolves
+# to this script (any PATH entry counts, not only the first match)
+autotag_on_path() {
+    local dir candidate real
+    local IFS=:
+ 
+    for dir in $PATH; do
+        [ -n "$dir" ] || continue
+        candidate="$dir/autotag"
+        [ -x "$candidate" ] || continue
+        real="$(resolve_path "$candidate")" || continue
+        [ "$real" = "$SELF_PATH" ] && return 0
+    done
+ 
+    return 1
+}
+ 
+# warn_unless_on_path
+#
+# Warns when autotag is not installed on PATH, to nudge the user towards
+# 'autotag install' instead of habitual './autotag.sh' runs; execution
+# continues either way.
+warn_unless_on_path() {
+    autotag_on_path && return 0
+ 
+    warn "Autotag is not in PATH. To install it run: $SCRIPT_NAME install"
+}
+ 
+ 
+# =============================================================================
+# INSTALLATION  (autotag install / autotag uninstall)
+# =============================================================================
+ 
+# pick_bin_dir
+#
+# Prints the first existing writable directory from the preference list;
+# user-owned directories are preferred over system-wide ones.
+pick_bin_dir() {
+    local dir
+ 
+    for dir in "$HOME/.local/bin" "/opt/homebrew/bin" "/usr/local/bin" "$HOME/bin"; do
+        [ -d "$dir" ] && [ -w "$dir" ] && { printf '%s\n' "$dir"; return 0; }
+    done
+ 
+    return 1
+}
+ 
+# cmd_install
+#
+# Creates an 'autotag' symlink to this script in $BIN_DIR (or the directory
+# picked by pick_bin_dir) and checks that the directory is on PATH.
+cmd_install() {
+    local dir="$BIN_DIR" link real
+ 
+    if [ -z "$dir" ]; then
+        dir="$(pick_bin_dir)" ||
+            die "no writable bin directory found; pass --bin DIR"
+    fi
+ 
+    mkdir -p "$dir" 2>/dev/null || die "cannot create bin directory: $dir"
+ 
+    link="$dir/autotag"
+ 
+    if [ -L "$link" ] || [ -e "$link" ]; then
+        real="$(resolve_path "$link" 2>/dev/null)" || real=""
+        if [ "$real" != "$SELF_PATH" ]; then
+            warn "replacing existing $link (${real:-not resolvable})"
+        fi
+    fi
+ 
+    ln -sfn "$SELF_PATH" "$link" ||
+        die "failed to create symlink: $link"
+ 
+    echo "Installed: $link -> $SELF_PATH"
+ 
+    if ! dir_on_path "$dir"; then
+        warn "$dir is not on your PATH"
+        echo "Add it, e.g.:  echo 'export PATH=\"$dir:\$PATH\"' >> ~/.zshrc"
+    fi
+}
+ 
+# cmd_uninstall
+#
+# Removes 'autotag' entries that resolve to this script: the one in $BIN_DIR
+# if given, otherwise every one found on PATH.
+cmd_uninstall() {
+    local dir candidate real found=0
+ 
+    if [ -n "$BIN_DIR" ]; then
+        candidate="$BIN_DIR/autotag"
+        if real="$(resolve_path "$candidate" 2>/dev/null)" &&
+           [ "$real" = "$SELF_PATH" ]; then
+            rm "$candidate" || die "failed to remove: $candidate"
+            echo "Removed: $candidate"
+            return 0
+        fi
+        echo "No installation of this script in $BIN_DIR."
+        return 1
+    fi
+ 
+    local IFS=:
+ 
+    for dir in $PATH; do
+        [ -n "$dir" ] || continue
+        candidate="$dir/autotag"
+        [ -e "$candidate" ] || continue
+        real="$(resolve_path "$candidate" 2>/dev/null)" || continue
+        if [ "$real" = "$SELF_PATH" ]; then
+            rm "$candidate" || die "failed to remove: $candidate"
+            echo "Removed: $candidate"
+            found=1
+        fi
+    done
+ 
+    if [ "$found" -eq 0 ]; then
+        echo "No installation of this script found on PATH."
+        return 1
+    fi
+ 
+    return 0
+}
+ 
+ 
+# =============================================================================
 # CONFIGURATION ACCESS
 # =============================================================================
+ 
+# load_user_rules
+#
+# Optional user rules, sourced from autotag.rules next to the script
+# (AUTOTAG_RULES overrides the location). The file may define RULES (an
+# alias table like the built-in one) and DEFAULT_RULE; user aliases take
+# precedence over built-ins with the same name. Rule types and templates
+# are built in and cannot be overridden. A repository-local rules file will
+# be searched here later.
+load_user_rules() {
+    local file
+    local default_file="${SCRIPT_DIR}/autotag.rules"
+    local saved_templates="$TEMPLATES"
+ 
+    USER_RULES=""
+    file="${AUTOTAG_RULES:-$default_file}"
+ 
+    if [ ! -f "$file" ]; then
+        RULES="$BUILTIN_RULES"
+        return 0
+    fi
+ 
+    RULES=""
+    # shellcheck source=/dev/null
+    . "$file"
+ 
+    if [ "$TEMPLATES" != "$saved_templates" ]; then
+        warn "ignoring TEMPLATES from $file: templates are built in"
+        TEMPLATES="$saved_templates"
+    fi
+ 
+    USER_RULES="$(trim "$RULES")"
+ 
+    RULES="$BUILTIN_RULES"
+    if [ -n "$USER_RULES" ]; then
+        RULES="$USER_RULES
+$BUILTIN_RULES"
+    fi
+}
  
 # load_rule ALIAS
 #
@@ -296,10 +530,9 @@ validate_loaded_rule() {
     fi
 }
  
-print_available_rules() {
+# print_rule_table TABLE  (one rule table, one line per rule)
+print_rule_table() {
     local aliases rule prefix variants default
- 
-    echo "Available rules:"
  
     while IFS='|' read -r aliases rule prefix variants default; do
  
@@ -318,8 +551,21 @@ print_available_rules() {
             "$aliases" "$rule" "${prefix:-<none>}"
  
     done <<EOF
-$RULES
+$1
 EOF
+}
+ 
+print_available_rules() {
+    if [ -n "$USER_RULES" ]; then
+        echo "Your rules (autotag.rules):"
+        print_rule_table "$USER_RULES"
+        echo
+        echo "Built-in rules:"
+    else
+        echo "Built-in rules:"
+    fi
+ 
+    print_rule_table "$BUILTIN_RULES"
 }
  
  
@@ -472,13 +718,17 @@ find_latest_semver() {
     done < <(git_cmd tag --list)
 }
  
-# find_latest_rc REGEX MAJOR MINOR PATCH
+# find_latest_rc_series REGEX
 #
-# Sets LATEST_RC: largest RC number for exactly this MAJOR.MINOR.PATCH.
-find_latest_rc() {
-    local regex="$1" want_ma="$2" want_mi="$3" want_pa="$4"
-    local tag n rc
+# Sets LATEST_RC_MAJOR LATEST_RC_MINOR LATEST_RC_PATCH and LATEST_RC: the
+# highest version that has rc tags, and the largest rc number within that
+# version. All empty if no rc tag matches.
+find_latest_rc_series() {
+    local regex="$1" tag n rc vkey best_vkey=""
  
+    LATEST_RC_MAJOR=""
+    LATEST_RC_MINOR=""
+    LATEST_RC_PATCH=""
     LATEST_RC=""
  
     while IFS= read -r tag; do
@@ -487,13 +737,20 @@ find_latest_rc() {
  
         n=${#BASH_REMATCH[@]}
  
-        [ "$((10#${BASH_REMATCH[$((n - 4))]}))" -eq "$want_ma" ] || continue
-        [ "$((10#${BASH_REMATCH[$((n - 3))]}))" -eq "$want_mi" ] || continue
-        [ "$((10#${BASH_REMATCH[$((n - 2))]}))" -eq "$want_pa" ] || continue
+        printf -v vkey '%010d%010d%010d' \
+            "$((10#${BASH_REMATCH[$((n - 4))]}))" \
+            "$((10#${BASH_REMATCH[$((n - 3))]}))" \
+            "$((10#${BASH_REMATCH[$((n - 2))]}))"
  
         rc="$((10#${BASH_REMATCH[$((n - 1))]}))"
  
-        if [ -z "$LATEST_RC" ] || [ "$rc" -gt "$LATEST_RC" ]; then
+        if [ -z "$best_vkey" ] || [[ "$vkey" > "$best_vkey" ]]; then
+            best_vkey="$vkey"
+            LATEST_RC_MAJOR="$((10#${BASH_REMATCH[$((n - 4))]}))"
+            LATEST_RC_MINOR="$((10#${BASH_REMATCH[$((n - 3))]}))"
+            LATEST_RC_PATCH="$((10#${BASH_REMATCH[$((n - 2))]}))"
+            LATEST_RC="$rc"
+        elif [ "$vkey" = "$best_vkey" ] && [ "$rc" -gt "$LATEST_RC" ]; then
             LATEST_RC="$rc"
         fi
  
@@ -514,7 +771,8 @@ find_latest_rc() {
 #   7.1.3-12 -> minor -> 7.2.0-1
 #   7.1.3-12 -> patch -> 7.1.4-1
 #   7.1.3-12 -> build -> 7.1.3-13
-#   7.1.3-12 -> rc    -> 7.1.3-rc1, 7.1.3-rc2, ...
+#   rc targets the newest version seen (latest release or rc tag):
+#   7.1.3-12 -> rc -> 7.1.3-rc1, 7.1.3-rc2, ...; 8.0.0-rc5 -> rc -> 8.0.0-rc6
 # No previous release: counting starts from 0.0.0 (build 0).
 next_tag_semvertag() {
     local rule="$1" prefix="$2" variant="$3"
@@ -549,9 +807,27 @@ next_tag_semvertag() {
             re_rc="$(expand_regex "$rule" rc "$prefix")" || return 1
             fmt="$(template_field "$rule" rc format)" || return 1
  
-            find_latest_rc "$re_rc" "$major" "$minor" "$patch"
+            find_latest_rc_series "$re_rc"
  
-            rc=$(( ${LATEST_RC:-0} + 1 ))
+            rc=1
+ 
+            if [ -n "$LATEST_RC" ]; then
+                local key_release key_rc
+ 
+                printf -v key_release '%010d%010d%010d' "$major" "$minor" "$patch"
+                printf -v key_rc '%010d%010d%010d' \
+                    "$LATEST_RC_MAJOR" "$LATEST_RC_MINOR" "$LATEST_RC_PATCH"
+ 
+                # Anchor to the newest version seen. An rc series for a
+                # version older than the latest release is stale and starts
+                # over at rc1 for the released version.
+                if [[ "$key_rc" > "$key_release" ]] || [ "$key_rc" = "$key_release" ]; then
+                    major="$LATEST_RC_MAJOR"
+                    minor="$LATEST_RC_MINOR"
+                    patch="$LATEST_RC_PATCH"
+                    rc=$((LATEST_RC + 1))
+                fi
+            fi
  
             NEW_TAG="$(render_format "$fmt" \
                 PREFIX "$pfx" MAJOR "$major" MINOR "$minor" \
@@ -621,10 +897,24 @@ next_tag_bleeding() {
  
 REPO_PATH="."
 CLI_RULE=""
+COMMAND=""
+BIN_DIR=""
  
 while [ $# -gt 0 ]; do
  
     case "$1" in
+ 
+        install|uninstall)
+            [ -z "$COMMAND" ] || die "only one command is allowed"
+            COMMAND="$1"
+            shift
+            ;;
+ 
+        --bin)
+            [ $# -ge 2 ] || die "option $1 requires a directory"
+            BIN_DIR="$2"
+            shift 2
+            ;;
  
         -p|--path)
             [ $# -ge 2 ] || die "option $1 requires a path"
@@ -652,9 +942,42 @@ while [ $# -gt 0 ]; do
  
 done
  
+if [ -n "$BIN_DIR" ] && [ -z "$COMMAND" ]; then
+    die "--bin is only valid with install/uninstall"
+fi
+ 
+if [ -n "$COMMAND" ]; then
+    [ "$REPO_PATH" = "." ] || die "-p/--path is not valid with $COMMAND"
+    [ -z "$CLI_RULE" ] || die "-r/--rule is not valid with $COMMAND"
+fi
+ 
  
 # -----------------------------------------------------------------------------
-# 2. Check Git repository.
+# 2. Handle install/uninstall.
+# -----------------------------------------------------------------------------
+ 
+case "$COMMAND" in
+    install)   cmd_install;   exit 0 ;;
+    uninstall) cmd_uninstall; exit $? ;;
+esac
+ 
+ 
+# -----------------------------------------------------------------------------
+# 3. Warn if autotag is not installed on PATH.
+# -----------------------------------------------------------------------------
+ 
+warn_unless_on_path
+ 
+ 
+# -----------------------------------------------------------------------------
+# 4. Load user rules.
+# -----------------------------------------------------------------------------
+ 
+load_user_rules
+ 
+ 
+# -----------------------------------------------------------------------------
+# 5. Check Git repository.
 # -----------------------------------------------------------------------------
  
 if ! is_git_repository; then
@@ -668,7 +991,7 @@ REPO_PATH="$REPO_ROOT"
  
  
 # -----------------------------------------------------------------------------
-# 3. Fetch tags.
+# 6. Fetch tags.
 # -----------------------------------------------------------------------------
  
 echo "Fetching tags from '$REMOTE'..."
@@ -678,7 +1001,7 @@ git_cmd fetch --tags --force "$REMOTE" ||
  
  
 # -----------------------------------------------------------------------------
-# 4. Check active branch.
+# 7. Check active branch.
 # -----------------------------------------------------------------------------
  
 CURRENT_BRANCH="$(get_current_branch)" ||
@@ -686,7 +1009,7 @@ CURRENT_BRANCH="$(get_current_branch)" ||
  
  
 # -----------------------------------------------------------------------------
-# 5. Check HEAD commit.
+# 8. Check HEAD commit.
 # -----------------------------------------------------------------------------
  
 HEAD_COMMIT="$(get_head_commit)" ||
@@ -702,7 +1025,7 @@ fi
  
  
 # -----------------------------------------------------------------------------
-# 6. Check tags on current commit.
+# 9. Check tags on current commit.
 # -----------------------------------------------------------------------------
  
 HEAD_TAGS="$(git_cmd tag --points-at "$HEAD_COMMIT")"
@@ -723,16 +1046,7 @@ fi
  
  
 # -----------------------------------------------------------------------------
-# 7. Validate configuration.
-# -----------------------------------------------------------------------------
- 
-if [ -z "$(trim "$RULES")" ]; then
-    die "no rules are configured"
-fi
- 
- 
-# -----------------------------------------------------------------------------
-# 8. Select rule.
+# 10. Select rule.
 # -----------------------------------------------------------------------------
  
 RULE_ALIAS="$CLI_RULE"
@@ -758,7 +1072,7 @@ fi
  
  
 # -----------------------------------------------------------------------------
-# 9. Read rule configuration.
+# 11. Read rule configuration.
 # -----------------------------------------------------------------------------
  
 if ! load_rule "$RULE_ALIAS"; then
@@ -779,7 +1093,7 @@ echo "Prefix:     ${PREFIX:-<none>}"
  
  
 # -----------------------------------------------------------------------------
-# 10. Select variant.
+# 12. Select variant.
 # -----------------------------------------------------------------------------
  
 VARIANT=""
@@ -810,7 +1124,7 @@ fi
  
  
 # -----------------------------------------------------------------------------
-# 11. Calculate next tag.
+# 13. Calculate next tag.
 # -----------------------------------------------------------------------------
  
 echo
@@ -829,7 +1143,7 @@ echo "New tag:      $NEW_TAG"
  
  
 # -----------------------------------------------------------------------------
-# 12. Make sure generated tag doesn't already exist.
+# 14. Make sure generated tag doesn't already exist.
 # -----------------------------------------------------------------------------
  
 if git_cmd rev-parse --verify --quiet "refs/tags/$NEW_TAG" >/dev/null; then
@@ -838,7 +1152,7 @@ fi
  
  
 # -----------------------------------------------------------------------------
-# 13. Confirm creation.
+# 15. Confirm creation.
 # -----------------------------------------------------------------------------
  
 echo
@@ -851,7 +1165,7 @@ fi
  
  
 # -----------------------------------------------------------------------------
-# 14. Create local tag.
+# 16. Create local tag.
 # -----------------------------------------------------------------------------
  
 git_cmd tag "$NEW_TAG" "$HEAD_COMMIT" ||
@@ -861,7 +1175,7 @@ echo "Tag created locally: $NEW_TAG"
  
  
 # -----------------------------------------------------------------------------
-# 15. Push branch and tag atomically.
+# 17. Push branch and tag atomically.
 # -----------------------------------------------------------------------------
  
 echo
