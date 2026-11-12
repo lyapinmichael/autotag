@@ -68,8 +68,59 @@ REMOTE="origin"
 # Separator between prefix and version. Part of the expanded prefix.
 PREFIX_SEP="-"
  
-# Rules, templates and the default rule live in autotag.rules next to this
-# script; see load_rules_file below. Tool-level settings stay here.
+# Default rule alias. Empty = always ask; the user rules file may override.
+DEFAULT_RULE="debug"
+ 
+ 
+# =============================================================================
+# BUILT-IN RULES
+#
+# Shipped with the script and not meant to be changed: together with the
+# rule-type handlers below they define how autotag operates. User aliases
+# are added (and built-in aliases redefined) in autotag.rules next to the
+# script.
+# =============================================================================
+ 
+# -----------------------------------------------------------------------------
+# BUILT-IN RULE TABLE  (same format as the user table in autotag.rules)
+# -----------------------------------------------------------------------------
+ 
+BUILTIN_RULES='
+release     | semvertag |       | major minor patch build rc | build
+debug       | bleeding  | debug |                            |
+'
+ 
+# -----------------------------------------------------------------------------
+# TEMPLATES
+#
+#   RULE | KIND | FORMAT | REGEX
+#
+#   RULE   Rule type the row applies to: semvertag or bleeding.
+#   KIND   Which flavour of tag the row describes:
+#            release  a regular tag; every rule type needs this row
+#            rc       a release candidate; semvertag needs it when the rule
+#                     offers the rc variant (bleeding never uses rc)
+#   FORMAT How a new tag is rendered. Placeholders:
+#            {PREFIX}  prefix + PREFIX_SEP, or nothing if the prefix is empty
+#            {MAJOR} {MINOR} {PATCH} {BUILD} {RC}   used by semvertag
+#            {YEAR} {WEEK}                           used by bleeding
+#          Use only the placeholders the rule type's handler provides.
+#   REGEX  ERE that recognises existing tags; anchor it with ^...$. Being the
+#          last field, it may contain '|'. Placeholder:
+#            {PREFIX?}  optional prefix group "(prefix-)?", or nothing
+#          The regex MUST end with the numeric capture groups below; groups
+#          are read from the END of the match, so the optional prefix group
+#          never shifts the numbering:
+#            semvertag/release : major minor patch build
+#            semvertag/rc      : major minor patch rc
+#            bleeding/release  : year week build
+# -----------------------------------------------------------------------------
+ 
+TEMPLATES='
+semvertag | release | {PREFIX}{MAJOR}.{MINOR}.{PATCH}-{BUILD} | ^{PREFIX?}([0-9]+)\.([0-9]+)\.([0-9]+)-([0-9]+)$
+semvertag | rc      | {PREFIX}{MAJOR}.{MINOR}.{PATCH}-rc{RC}  | ^{PREFIX?}([0-9]+)\.([0-9]+)\.([0-9]+)-rc([0-9]+)$
+bleeding  | release | {PREFIX}{YEAR}.{WEEK}.{BUILD}           | ^{PREFIX?}([0-9]{2})\.([0-9]{2})\.([0-9]+)$
+'
  
  
 # =============================================================================
@@ -100,7 +151,8 @@ Usage:
  
 Options:
   -p, --path PATH       Git repository path.
-  -r, --rule ALIAS      Rule alias (see autotag.rules).
+  -r, --rule ALIAS      Rule alias (built-in: release, debug; user aliases
+                        in autotag.rules).
   --bin DIR             Bin directory for install/uninstall.
   -h, --help            Show this help.
  
@@ -301,26 +353,42 @@ cmd_uninstall() {
 # CONFIGURATION ACCESS
 # =============================================================================
  
-# load_rules_file
+# load_user_rules
 #
-# Sources the rule definitions. AUTOTAG_RULES overrides the default location
-# (autotag.rules next to the script); a repository-local rules file will be
-# searched here later.
-load_rules_file() {
+# Optional user rules, sourced from autotag.rules next to the script
+# (AUTOTAG_RULES overrides the location). The file may define RULES (an
+# alias table like the built-in one) and DEFAULT_RULE; user aliases take
+# precedence over built-ins with the same name. Rule types and templates
+# are built in and cannot be overridden. A repository-local rules file will
+# be searched here later.
+load_user_rules() {
     local file
     local default_file="${SCRIPT_DIR}/autotag.rules"
+    local saved_templates="$TEMPLATES"
  
+    USER_RULES=""
     file="${AUTOTAG_RULES:-$default_file}"
  
     if [ ! -f "$file" ]; then
-        die "rules file not found: $file (set AUTOTAG_RULES to override)"
+        RULES="$BUILTIN_RULES"
+        return 0
     fi
  
+    RULES=""
     # shellcheck source=/dev/null
     . "$file"
  
-    if [ -z "$(trim "$RULES")" ]; then
-        die "no rules are defined in $file"
+    if [ "$TEMPLATES" != "$saved_templates" ]; then
+        warn "ignoring TEMPLATES from $file: templates are built in"
+        TEMPLATES="$saved_templates"
+    fi
+ 
+    USER_RULES="$(trim "$RULES")"
+ 
+    RULES="$BUILTIN_RULES"
+    if [ -n "$USER_RULES" ]; then
+        RULES="$USER_RULES
+$BUILTIN_RULES"
     fi
 }
  
@@ -462,10 +530,9 @@ validate_loaded_rule() {
     fi
 }
  
-print_available_rules() {
+# print_rule_table TABLE  (one rule table, one line per rule)
+print_rule_table() {
     local aliases rule prefix variants default
- 
-    echo "Available rules:"
  
     while IFS='|' read -r aliases rule prefix variants default; do
  
@@ -484,8 +551,21 @@ print_available_rules() {
             "$aliases" "$rule" "${prefix:-<none>}"
  
     done <<EOF
-$RULES
+$1
 EOF
+}
+ 
+print_available_rules() {
+    if [ -n "$USER_RULES" ]; then
+        echo "Your rules (autotag.rules):"
+        print_rule_table "$USER_RULES"
+        echo
+        echo "Built-in rules:"
+    else
+        echo "Built-in rules:"
+    fi
+ 
+    print_rule_table "$BUILTIN_RULES"
 }
  
  
@@ -890,10 +970,10 @@ warn_unless_on_path
  
  
 # -----------------------------------------------------------------------------
-# 4. Load rules.
+# 4. Load user rules.
 # -----------------------------------------------------------------------------
  
-load_rules_file
+load_user_rules
  
  
 # -----------------------------------------------------------------------------
